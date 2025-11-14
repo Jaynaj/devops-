@@ -6,9 +6,11 @@ A comprehensive DevOps pipeline implementation using GitHub Actions, AWS, Azure,
 
 ### 🚀 Automated CI/CD Pipelines
 
+- **Packer Image Building**: Automated AMI and VM image creation for AWS and Azure
 - **Multi-Registry Docker Builds**: Build once, push to AWS ECR, Azure ACR, and GitHub Container Registry
 - **Security Scanning**: Integrated vulnerability scanning with Trivy, Snyk, and secret detection
 - **Blue-Green Deployments**: Zero-downtime deployments to AWS ECS using CodeDeploy
+- **Modular Infrastructure as Code**: Terraform modules for networking, compute, and more
 - **Infrastructure as Code**: Terraform Cloud integration with approval workflows
 - **Helm Chart Publishing**: Package and publish Helm charts to GHCR OCI registry
 
@@ -26,29 +28,46 @@ A comprehensive DevOps pipeline implementation using GitHub Actions, AWS, Azure,
 ```
 .
 ├── .github/
-│   ├── workflows/              # GitHub Actions workflows
+│   ├── workflows/                    # GitHub Actions workflows
 │   │   ├── build-scan-push-registries.yml   # Docker build and multi-registry push
 │   │   ├── ecs-bluegreen-deployment.yml     # ECS Blue-Green deployments
 │   │   ├── terraform-cloud.yml              # Terraform Cloud integration
 │   │   ├── ghcr-helm-publish.yml            # GHCR and Helm chart publishing
 │   │   ├── security-scanning.yml            # Comprehensive security scans
+│   │   ├── packer-build.yml                 # Packer image building
 │   │   └── README.md                        # Workflows documentation
-│   └── SETUP_GUIDE.md          # Step-by-step setup instructions
-├── terraform/                  # Terraform configurations
-│   ├── main.tf                # Provider and backend configuration
-│   ├── variables.tf           # Input variables
-│   ├── outputs.tf             # Output values
-│   ├── ecs.tf                 # ECS cluster and service
-│   ├── network.tf             # VPC, subnets, ALB
-│   └── codedeploy.tf          # CodeDeploy for Blue-Green
-├── helm/                      # Helm charts
-│   └── myapp/                # Application Helm chart
+│   └── SETUP_GUIDE.md                # Step-by-step setup instructions
+├── packer/                           # Packer templates for image building
+│   ├── aws/
+│   │   └── aws-ami.pkr.hcl          # AWS AMI configuration
+│   ├── azure/
+│   │   └── azure-image.pkr.hcl      # Azure VM image configuration
+│   ├── scripts/                      # Provisioning scripts
+│   │   ├── update-system.sh
+│   │   ├── install-docker.sh
+│   │   ├── install-aws-tools.sh
+│   │   ├── install-azure-tools.sh
+│   │   ├── security-hardening.sh
+│   │   └── cleanup.sh
+│   └── README.md                     # Packer documentation
+├── terraform/                        # Modular Terraform configurations
+│   ├── modules/                     # Reusable modules
+│   │   ├── networking/              # VPC, subnets, routing
+│   │   └── compute/
+│   │       └── ecs/                 # ECS cluster and services
+│   ├── environments/                # Environment-specific configs
+│   │   ├── dev/                     # Development environment
+│   │   ├── staging/                 # Staging environment
+│   │   └── production/              # Production environment
+│   └── README.md                    # Terraform documentation
+├── helm/                            # Helm charts
+│   └── myapp/                      # Application Helm chart
 │       ├── Chart.yaml
 │       ├── values.yaml
 │       └── templates/
-├── Dockerfile                 # Multi-stage Docker build
-├── appspec.yaml              # ECS deployment specification
-└── .gitignore                # Prevent secrets in git
+├── Dockerfile                       # Multi-stage Docker build
+├── appspec.yaml                    # ECS deployment specification
+└── .gitignore                      # Prevent secrets in git
 
 ```
 
@@ -129,6 +148,19 @@ A comprehensive DevOps pipeline implementation using GitHub Actions, AWS, Azure,
 
 **Triggers**: Push to terraform files, Pull requests, Manual
 
+### Packer Image Building
+
+**File**: `.github/workflows/packer-build.yml`
+
+- Validates Packer templates
+- Builds AWS AMIs with security hardening
+- Builds Azure VM images
+- Installs Docker, monitoring agents, and dependencies
+- Applies security hardening to base images
+- Generates image manifests
+
+**Triggers**: Push to packer files, Pull requests, Manual
+
 ### GHCR and Helm Publishing
 
 **File**: `.github/workflows/ghcr-helm-publish.yml`
@@ -169,7 +201,8 @@ A comprehensive DevOps pipeline implementation using GitHub Actions, AWS, Azure,
 
 - **Workflows**: [.github/workflows/README.md](.github/workflows/README.md)
 - **Setup Guide**: [.github/SETUP_GUIDE.md](.github/SETUP_GUIDE.md)
-- **Terraform**: [terraform/](terraform/)
+- **Packer Templates**: [packer/README.md](packer/README.md)
+- **Terraform Modules**: [terraform/README.md](terraform/README.md)
 - **Helm Charts**: [helm/](helm/)
 
 ## Architecture
