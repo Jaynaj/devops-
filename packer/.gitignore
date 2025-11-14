@@ -1,0 +1,17 @@
+# Packer cache
+packer_cache/
+
+# Packer manifest
+manifest.json
+*.manifest.json
+
+# Variable files that may contain secrets
+*.auto.pkrvars.hcl
+secrets.pkrvars.hcl
+
+# Crash logs
+crash.log
+
+# Build artifacts
+builds/
+output/
