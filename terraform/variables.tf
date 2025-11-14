@@ -21,6 +21,16 @@ variable "cloud_provider" {
   }
 }
 
+variable "os_type" {
+  description = "Operating system type (linux, windows, or both)"
+  type        = string
+  default     = "linux"
+  validation {
+    condition     = contains(["linux", "windows", "both"], var.os_type)
+    error_message = "OS type must be linux, windows, or both."
+  }
+}
+
 # AWS variables
 variable "aws_region" {
   description = "AWS region to deploy resources"
@@ -29,7 +39,13 @@ variable "aws_region" {
 }
 
 variable "packer_ami_id" {
-  description = "AMI ID created by Packer"
+  description = "Linux AMI ID created by Packer"
+  type        = string
+  default     = ""
+}
+
+variable "packer_windows_ami_id" {
+  description = "Windows AMI ID created by Packer"
   type        = string
   default     = ""
 }
@@ -54,7 +70,13 @@ variable "azure_resource_group_name" {
 }
 
 variable "packer_azure_image_id" {
-  description = "Azure Image ID created by Packer"
+  description = "Linux Azure Image ID created by Packer"
+  type        = string
+  default     = ""
+}
+
+variable "packer_azure_windows_image_id" {
+  description = "Windows Azure Image ID created by Packer"
   type        = string
   default     = ""
 }

@@ -1,28 +1,35 @@
 # DevOps Infrastructure - Multi-Cloud with Terraform & Packer
 
-A comprehensive Infrastructure as Code (IaC) solution for building and deploying machine images across **AWS** and **Azure** using HashiCorp Packer and Terraform.
+A comprehensive Infrastructure as Code (IaC) solution for building and deploying **Linux and Windows** machine images across **AWS** and **Azure** using HashiCorp Packer and Terraform.
 
 ## Overview
 
 This repository provides a complete multi-cloud infrastructure setup that enables you to:
 
 1. **Build machine images** with Packer for both AWS (AMIs) and Azure (Managed Images)
-2. **Deploy infrastructure** with Terraform using those custom-built images
-3. **Manage multi-cloud environments** with a unified workflow
+2. **Support both Linux and Windows** operating systems
+3. **Deploy infrastructure** with Terraform using those custom-built images
+4. **Manage multi-cloud environments** with a unified workflow
 
 ## Repository Structure
 
 ```
 .
 ├── packer/                      # Packer configurations for image building
-│   ├── variables.pkr.hcl       # Variable definitions (AWS & Azure)
+│   ├── variables.pkr.hcl       # Variable definitions (AWS & Azure, Linux & Windows)
 │   ├── templates/              # Packer templates
-│   │   ├── aws-ami.pkr.hcl    # AWS AMI template
-│   │   ├── azure-image.pkr.hcl # Azure Managed Image template
-│   │   └── multi-cloud.pkr.hcl # Multi-cloud template (both platforms)
+│   │   ├── aws-ami.pkr.hcl            # AWS Linux AMI template
+│   │   ├── aws-windows-ami.pkr.hcl    # AWS Windows AMI template
+│   │   ├── azure-image.pkr.hcl        # Azure Linux image template
+│   │   ├── azure-windows-image.pkr.hcl# Azure Windows image template
+│   │   ├── multi-cloud.pkr.hcl        # Linux multi-cloud template
+│   │   └── multi-cloud-all.pkr.hcl    # All OS + All Cloud template
 │   ├── scripts/                # Provisioning scripts
-│   │   ├── provision.sh       # AWS provisioning (Amazon Linux)
-│   │   └── provision-azure.sh # Azure provisioning (Ubuntu)
+│   │   ├── provision.sh                # AWS Linux (Amazon Linux 2)
+│   │   ├── provision-azure.sh          # Azure Linux (Ubuntu 22.04)
+│   │   ├── provision-windows.ps1       # AWS Windows Server 2022
+│   │   ├── provision-windows-azure.ps1 # Azure Windows Server 2022
+│   │   └── enable-winrm.ps1            # WinRM enablement for Windows
 │   └── README.md               # Detailed Packer documentation
 │
 ├── terraform/                   # Terraform configurations
@@ -74,12 +81,19 @@ cd packer
 # Initialize Packer plugins
 packer init templates/multi-cloud.pkr.hcl
 
-# Build images for both AWS and Azure
-packer build templates/multi-cloud.pkr.hcl
+# Build all images (AWS+Azure, Linux+Windows)
+packer build templates/multi-cloud-all.pkr.hcl
 
-# Or build for specific cloud:
-packer build templates/aws-ami.pkr.hcl        # AWS only
-packer build templates/azure-image.pkr.hcl    # Azure only
+# Or build for specific combinations:
+packer build templates/aws-ami.pkr.hcl              # AWS Linux only
+packer build templates/aws-windows-ami.pkr.hcl      # AWS Windows only
+packer build templates/azure-image.pkr.hcl          # Azure Linux only
+packer build templates/azure-windows-image.pkr.hcl  # Azure Windows only
+
+# Or use filters with multi-cloud-all template:
+packer build -only='*-linux' templates/multi-cloud-all.pkr.hcl    # All Linux
+packer build -only='*-windows' templates/multi-cloud-all.pkr.hcl  # All Windows
+packer build -only='aws-*' templates/multi-cloud-all.pkr.hcl      # All AWS
 ```
 
 ### Step 2: Deploy Infrastructure with Terraform
@@ -90,14 +104,14 @@ cd terraform
 # Initialize Terraform
 terraform init
 
-# Deploy to AWS
-terraform apply -var 'cloud_provider=aws'
+# Deploy to AWS (Linux)
+terraform apply -var 'cloud_provider=aws' -var 'os_type=linux'
 
-# Deploy to Azure
-terraform apply -var 'cloud_provider=azure'
+# Deploy to Azure (Windows)
+terraform apply -var 'cloud_provider=azure' -var 'os_type=windows'
 
-# Deploy to both clouds
-terraform apply -var 'cloud_provider=multi'
+# Deploy to both clouds with both OS types
+terraform apply -var 'cloud_provider=multi' -var 'os_type=both'
 ```
 
 ## Detailed Documentation
@@ -108,9 +122,15 @@ terraform apply -var 'cloud_provider=multi'
 ## Features
 
 ### Multi-Cloud Support
-- **AWS**: Amazon Linux 2-based AMIs
-- **Azure**: Ubuntu 22.04-based Managed Images
+- **AWS**: Amazon Linux 2 and Windows Server 2022 AMIs
+- **Azure**: Ubuntu 22.04 and Windows Server 2022 Managed Images
 - **Flexible deployment**: Choose AWS, Azure, or both
+- **OS flexibility**: Build Linux, Windows, or both
+
+| Cloud | Linux OS        | Windows OS           |
+|-------|-----------------|----------------------|
+| AWS   | Amazon Linux 2  | Windows Server 2022  |
+| Azure | Ubuntu 22.04    | Windows Server 2022  |
 
 ### Image Building (Packer)
 - Separate templates for each cloud platform
