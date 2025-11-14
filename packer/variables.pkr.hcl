@@ -42,6 +42,27 @@ variable "aws_ssh_username" {
   default = "ec2-user"
 }
 
+# AWS Windows-specific variables
+variable "aws_windows_instance_type" {
+  type    = string
+  default = "t3.medium"
+}
+
+variable "source_windows_ami_owner" {
+  type    = string
+  default = "amazon"
+}
+
+variable "source_windows_ami_filter" {
+  type    = string
+  default = "Windows_Server-2022-English-Full-Base-*"
+}
+
+variable "aws_winrm_username" {
+  type    = string
+  default = "Administrator"
+}
+
 # Azure-specific variables
 variable "azure_location" {
   type    = string
@@ -95,6 +116,32 @@ variable "azure_image_sku" {
 }
 
 variable "azure_ssh_username" {
+  type    = string
+  default = "packer"
+}
+
+# Azure Windows-specific variables
+variable "azure_windows_vm_size" {
+  type    = string
+  default = "Standard_D2s_v3"
+}
+
+variable "azure_windows_image_publisher" {
+  type    = string
+  default = "MicrosoftWindowsServer"
+}
+
+variable "azure_windows_image_offer" {
+  type    = string
+  default = "WindowsServer"
+}
+
+variable "azure_windows_image_sku" {
+  type    = string
+  default = "2022-Datacenter"
+}
+
+variable "azure_winrm_username" {
   type    = string
   default = "packer"
 }
