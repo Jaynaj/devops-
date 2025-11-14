@@ -22,18 +22,19 @@ data "amazon-ami" "base" {
 
 # Build configuration
 source "amazon-ebs" "main" {
-  ami_name      = "${var.ami_name_prefix}-${var.environment}-{{timestamp}}"
-  instance_type = var.instance_type
+  ami_name      = "${var.image_name_prefix}-aws-${var.environment}-{{timestamp}}"
+  instance_type = var.aws_instance_type
   region        = var.aws_region
   source_ami    = data.amazon-ami.base.id
-  ssh_username  = var.ssh_username
+  ssh_username  = var.aws_ssh_username
 
   tags = {
-    Name        = "${var.ami_name_prefix}-${var.environment}"
+    Name        = "${var.image_name_prefix}-aws-${var.environment}"
     Environment = var.environment
     Project     = var.project_name
     BuildDate   = "{{timestamp}}"
     ManagedBy   = "Packer"
+    Cloud       = "AWS"
   }
 
   run_tags = {
@@ -80,7 +81,7 @@ build {
 
   # Post-processor to manifest the AMI ID
   post-processor "manifest" {
-    output     = "manifest.json"
+    output     = "manifest-aws.json"
     strip_path = true
   }
 }
