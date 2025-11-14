@@ -1,0 +1,396 @@
+name: Security Scanning and Secret Detection
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'feature/**'
+  pull_request:
+    branches:
+      - main
+      - develop
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  secret-scanning:
+    name: Secret Detection
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for comprehensive scanning
+
+      - name: TruffleHog Secret Scanning
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified --json
+
+      - name: Gitleaks Secret Detection
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+      - name: GitGuardian Secret Scanning
+        uses: GitGuardian/ggshield-action@master
+        env:
+          GITHUB_PUSH_BEFORE_SHA: ${{ github.event.before }}
+          GITHUB_PUSH_BASE_SHA: ${{ github.event.base }}
+          GITHUB_PULL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
+
+  dependency-scanning:
+    name: Dependency Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner in repo mode
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Snyk to check for vulnerabilities
+        uses: snyk/actions/node@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high --sarif-file-output=snyk-results.sarif
+
+      - name: Upload Snyk results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'snyk-results.sarif'
+
+  sast-scanning:
+    name: Static Application Security Testing
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript, python, java, go
+          queries: security-extended,security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:multi"
+
+      - name: Semgrep Security Scan
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/security-audit
+            p/secrets
+            p/owasp-top-ten
+            p/docker
+            p/kubernetes
+          generateSarif: true
+
+      - name: Upload Semgrep results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+
+  credential-check:
+    name: Credential and Sensitive Data Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for common credential files
+        run: |
+          echo "Checking for credential files..."
+
+          CREDENTIAL_FILES=(
+            ".env"
+            ".env.local"
+            ".env.production"
+            "credentials.json"
+            "service-account.json"
+            "*.pem"
+            "*.key"
+            "*.p12"
+            "*.pfx"
+            "id_rsa"
+            "id_dsa"
+            ".aws/credentials"
+            ".docker/config.json"
+            "*.kubeconfig"
+            "kubeconfig"
+          )
+
+          FOUND_FILES=()
+
+          for pattern in "${CREDENTIAL_FILES[@]}"; do
+            while IFS= read -r file; do
+              if [ -f "$file" ]; then
+                FOUND_FILES+=("$file")
+                echo "⚠️  WARNING: Found credential file: $file"
+              fi
+            done < <(find . -name "$pattern" -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null)
+          done
+
+          if [ ${#FOUND_FILES[@]} -gt 0 ]; then
+            echo ""
+            echo "❌ ERROR: Found ${#FOUND_FILES[@]} credential file(s)"
+            echo "Please ensure these files are listed in .gitignore and remove them from git history"
+            exit 1
+          else
+            echo "✅ No credential files found"
+          fi
+
+      - name: Check for hardcoded secrets patterns
+        run: |
+          echo "Checking for hardcoded secrets patterns..."
+
+          PATTERNS=(
+            "password\s*=\s*['\"][^'\"]+['\"]"
+            "api[_-]?key\s*=\s*['\"][^'\"]+['\"]"
+            "secret\s*=\s*['\"][^'\"]+['\"]"
+            "token\s*=\s*['\"][^'\"]+['\"]"
+            "AKIA[0-9A-Z]{16}"
+            "sk-[a-zA-Z0-9]{32,}"
+            "ghp_[a-zA-Z0-9]{36,}"
+            "gho_[a-zA-Z0-9]{36,}"
+          )
+
+          FOUND_PATTERNS=false
+
+          for pattern in "${PATTERNS[@]}"; do
+            if grep -rniE "$pattern" . --exclude-dir={.git,node_modules,.next,dist,build} --exclude="*.md" --exclude="security-scanning.yml"; then
+              FOUND_PATTERNS=true
+              echo "⚠️  WARNING: Found potential secret pattern: $pattern"
+            fi
+          done
+
+          if [ "$FOUND_PATTERNS" = true ]; then
+            echo ""
+            echo "❌ ERROR: Found potential hardcoded secrets"
+            echo "Please use environment variables or secret management systems"
+            exit 1
+          else
+            echo "✅ No hardcoded secrets patterns found"
+          fi
+
+      - name: Check .gitignore for common secret files
+        run: |
+          echo "Checking .gitignore configuration..."
+
+          REQUIRED_PATTERNS=(
+            ".env"
+            ".env.local"
+            "*.pem"
+            "*.key"
+            "credentials.json"
+          )
+
+          if [ ! -f ".gitignore" ]; then
+            echo "⚠️  WARNING: No .gitignore file found"
+            exit 1
+          fi
+
+          MISSING_PATTERNS=()
+
+          for pattern in "${REQUIRED_PATTERNS[@]}"; do
+            if ! grep -q "$pattern" .gitignore; then
+              MISSING_PATTERNS+=("$pattern")
+            fi
+          done
+
+          if [ ${#MISSING_PATTERNS[@]} -gt 0 ]; then
+            echo "⚠️  WARNING: The following patterns should be added to .gitignore:"
+            printf '%s\n' "${MISSING_PATTERNS[@]}"
+          else
+            echo "✅ .gitignore is properly configured"
+          fi
+
+  docker-security:
+    name: Docker Security Scan
+    runs-on: ubuntu-latest
+    if: hashFiles('Dockerfile') != ''
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image for scanning
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: security-scan:latest
+
+      - name: Run Trivy vulnerability scanner on image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: security-scan:latest
+          format: 'sarif'
+          output: 'trivy-docker-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy Docker results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-docker-results.sarif'
+
+      - name: Run Anchore Grype scanner
+        uses: anchore/scan-action@v3
+        with:
+          image: security-scan:latest
+          fail-build: false
+          severity-cutoff: high
+
+      - name: Scan for secrets in Docker image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: security-scan:latest
+          scanners: 'secret'
+          format: 'table'
+          exit-code: '1'
+
+  infrastructure-security:
+    name: Infrastructure Security Scan
+    runs-on: ubuntu-latest
+    if: hashFiles('terraform/**/*.tf', '**/*.yaml', '**/*.yml') != ''
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run tfsec for Terraform
+        uses: aquasecurity/tfsec-action@v1.0.3
+        if: hashFiles('terraform/**/*.tf') != ''
+        with:
+          working_directory: terraform
+          soft_fail: false
+          format: sarif
+          sarif_file: tfsec-results.sarif
+
+      - name: Upload tfsec results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('terraform/**/*.tf') != ''
+        with:
+          sarif_file: tfsec-results.sarif
+
+      - name: Run Checkov for IaC
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: .
+          framework: terraform,kubernetes,dockerfile,github_actions
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+          soft_fail: false
+
+      - name: Upload Checkov results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-results.sarif
+
+      - name: Kubernetes manifest security scan
+        uses: aquasecurity/trivy-action@master
+        if: hashFiles('**/*.yaml', '**/*.yml') != ''
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-k8s-results.sarif'
+
+      - name: Upload Kubernetes scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('**/*.yaml', '**/*.yml') != ''
+        with:
+          sarif_file: 'trivy-k8s-results.sarif'
+
+  security-report:
+    name: Generate Security Report
+    runs-on: ubuntu-latest
+    needs: [secret-scanning, dependency-scanning, sast-scanning, credential-check]
+    if: always()
+
+    steps:
+      - name: Generate security summary
+        run: |
+          echo "# Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Secret Scanning**: ${{ needs.secret-scanning.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dependency Scanning**: ${{ needs.dependency-scanning.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **SAST Scanning**: ${{ needs.sast-scanning.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Credential Check**: ${{ needs.credential-check.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Review the detailed results in the Security tab." >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment PR with security results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `## 🔒 Security Scan Results
+
+            | Check | Status |
+            |-------|--------|
+            | Secret Scanning | ${{ needs.secret-scanning.result }} |
+            | Dependency Scanning | ${{ needs.dependency-scanning.result }} |
+            | SAST Scanning | ${{ needs.sast-scanning.result }} |
+            | Credential Check | ${{ needs.credential-check.result }} |
+
+            Please review the detailed results in the Security tab before merging.`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });

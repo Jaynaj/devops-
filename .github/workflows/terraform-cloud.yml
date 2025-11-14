@@ -1,0 +1,309 @@
+name: Terraform Cloud Deployment
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/terraform-cloud.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'terraform/**'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Terraform action to perform'
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+      environment:
+        description: 'Environment to target'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+
+env:
+  TF_CLOUD_ORGANIZATION: "my-org"  # Replace with your Terraform Cloud organization
+  TF_API_TOKEN: "${{ secrets.TF_API_TOKEN }}"
+  TF_WORKSPACE_PREFIX: "myapp"
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  terraform-plan:
+    name: Terraform Plan (${{ github.event.inputs.environment || 'dev' }})
+    runs-on: ubuntu-latest
+    outputs:
+      plan-id: ${{ steps.plan.outputs.plan-id }}
+      run-id: ${{ steps.plan.outputs.run-id }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+          terraform_version: "1.6.0"
+
+      - name: Determine workspace
+        id: workspace
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            WORKSPACE="${{ env.TF_WORKSPACE_PREFIX }}-${{ inputs.environment }}"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            WORKSPACE="${{ env.TF_WORKSPACE_PREFIX }}-production"
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            WORKSPACE="${{ env.TF_WORKSPACE_PREFIX }}-staging"
+          else
+            WORKSPACE="${{ env.TF_WORKSPACE_PREFIX }}-dev"
+          fi
+          echo "workspace=$WORKSPACE" >> $GITHUB_OUTPUT
+          echo "Using workspace: $WORKSPACE"
+
+      - name: Terraform Format Check
+        id: fmt
+        run: terraform fmt -check -recursive
+        continue-on-error: true
+
+      - name: Terraform Init
+        id: init
+        run: |
+          cd terraform
+          terraform init \
+            -backend-config="organization=${{ env.TF_CLOUD_ORGANIZATION }}" \
+            -backend-config="workspaces.name=${{ steps.workspace.outputs.workspace }}"
+
+      - name: Terraform Validate
+        id: validate
+        run: |
+          cd terraform
+          terraform validate -no-color
+
+      - name: Run tfsec security scan
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: terraform
+          soft_fail: true
+          format: sarif
+          sarif_file: tfsec-results.sarif
+
+      - name: Upload tfsec results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: tfsec-results.sarif
+
+      - name: Run Checkov security scan
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+          soft_fail: true
+
+      - name: Upload Checkov results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-results.sarif
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd terraform
+          terraform plan -no-color -out=tfplan
+          terraform show -json tfplan > plan.json
+
+          # Extract plan summary
+          echo "Plan generated successfully"
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ steps.workspace.outputs.workspace }}
+          path: terraform/tfplan
+          retention-days: 30
+
+      - name: Comment PR with plan
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('terraform/plan.json', 'utf8');
+            const planSummary = JSON.parse(plan);
+
+            const output = `#### Terraform Plan Results 📋
+
+            **Workspace:** \`${{ steps.workspace.outputs.workspace }}\`
+            **Format Check:** \`${{ steps.fmt.outcome }}\`
+            **Initialization:** \`${{ steps.init.outcome }}\`
+            **Validation:** \`${{ steps.validate.outcome }}\`
+            **Plan:** \`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan Summary</summary>
+
+            \`\`\`
+            Resources to add: ${planSummary.resource_changes?.filter(r => r.change.actions.includes('create')).length || 0}
+            Resources to change: ${planSummary.resource_changes?.filter(r => r.change.actions.includes('update')).length || 0}
+            Resources to destroy: ${planSummary.resource_changes?.filter(r => r.change.actions.includes('delete')).length || 0}
+            \`\`\`
+
+            </details>
+
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+  approve-terraform:
+    name: Approve Terraform Apply
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    environment:
+      name: terraform-approval
+
+    steps:
+      - name: Manual approval checkpoint
+        run: |
+          echo "Manual approval received for Terraform apply"
+          echo "Proceeding with infrastructure changes..."
+
+  terraform-apply:
+    name: Terraform Apply (${{ github.event.inputs.environment || 'production' }})
+    runs-on: ubuntu-latest
+    needs: [terraform-plan, approve-terraform]
+    if: github.event_name != 'pull_request'
+    environment:
+      name: ${{ github.event.inputs.environment || 'production' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+          terraform_version: "1.6.0"
+
+      - name: Determine workspace
+        id: workspace
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            WORKSPACE="${{ env.TF_WORKSPACE_PREFIX }}-${{ inputs.environment }}"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            WORKSPACE="${{ env.TF_WORKSPACE_PREFIX }}-production"
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            WORKSPACE="${{ env.TF_WORKSPACE_PREFIX }}-staging"
+          else
+            WORKSPACE="${{ env.TF_WORKSPACE_PREFIX }}-dev"
+          fi
+          echo "workspace=$WORKSPACE" >> $GITHUB_OUTPUT
+
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init \
+            -backend-config="organization=${{ env.TF_CLOUD_ORGANIZATION }}" \
+            -backend-config="workspaces.name=${{ steps.workspace.outputs.workspace }}"
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-${{ steps.workspace.outputs.workspace }}
+          path: terraform/
+
+      - name: Terraform Apply
+        id: apply
+        run: |
+          cd terraform
+          terraform apply -auto-approve tfplan
+
+      - name: Output infrastructure details
+        run: |
+          cd terraform
+          terraform output -json > outputs.json
+          cat outputs.json
+
+      - name: Upload outputs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-outputs-${{ steps.workspace.outputs.workspace }}
+          path: terraform/outputs.json
+          retention-days: 90
+
+      - name: Create deployment record
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.sha,
+              environment: '${{ steps.workspace.outputs.workspace }}',
+              description: 'Terraform infrastructure deployment',
+              auto_merge: false,
+              required_contexts: []
+            });
+
+  terraform-destroy:
+    name: Terraform Destroy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+    environment:
+      name: terraform-destroy-approval
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+          terraform_version: "1.6.0"
+
+      - name: Determine workspace
+        id: workspace
+        run: |
+          WORKSPACE="${{ env.TF_WORKSPACE_PREFIX }}-${{ inputs.environment }}"
+          echo "workspace=$WORKSPACE" >> $GITHUB_OUTPUT
+
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init \
+            -backend-config="organization=${{ env.TF_CLOUD_ORGANIZATION }}" \
+            -backend-config="workspaces.name=${{ steps.workspace.outputs.workspace }}"
+
+      - name: Terraform Destroy
+        run: |
+          cd terraform
+          terraform destroy -auto-approve
+
+      - name: Notify destruction complete
+        run: |
+          echo "Infrastructure destroyed for workspace: ${{ steps.workspace.outputs.workspace }}"

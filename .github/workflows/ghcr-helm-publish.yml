@@ -1,0 +1,271 @@
+name: Build and Push to GHCR and Helm Chart
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    tags:
+      - 'v*.*.*'
+    paths:
+      - 'src/**'
+      - 'Dockerfile'
+      - 'helm/**'
+      - '.github/workflows/ghcr-helm-publish.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  HELM_CHART_NAME: myapp
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build-and-push-image:
+    name: Build and Push Docker Image to GHCR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better context
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=${{ github.repository }}
+            org.opencontainers.image.description=Application container image
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
+
+      - name: Build and push Docker image
+        id: push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ steps.meta.outputs.version }}
+          provenance: true
+          sbom: true
+
+      - name: Generate artifact attestation
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Output image details
+        run: |
+          echo "Image pushed to GHCR:"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
+          echo "Digest: ${{ steps.push.outputs.digest }}"
+          echo "Labels: ${{ steps.meta.outputs.labels }}"
+
+  package-and-push-helm:
+    name: Package and Push Helm Chart to GHCR
+    runs-on: ubuntu-latest
+    needs: build-and-push-image
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: '3.13.0'
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo ${{ secrets.GITHUB_TOKEN }} | helm registry login ${{ env.REGISTRY }} --username ${{ github.actor }} --password-stdin
+
+      - name: Determine chart version
+        id: chart-version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION="0.1.0-${GITHUB_SHA::7}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Chart version: $VERSION"
+
+      - name: Update chart version and appVersion
+        run: |
+          if [ -d "helm/${{ env.HELM_CHART_NAME }}" ]; then
+            sed -i "s/^version:.*/version: ${{ steps.chart-version.outputs.version }}/" helm/${{ env.HELM_CHART_NAME }}/Chart.yaml
+            sed -i "s/^appVersion:.*/appVersion: \"${{ steps.chart-version.outputs.version }}\"/" helm/${{ env.HELM_CHART_NAME }}/Chart.yaml
+
+            echo "Updated Chart.yaml:"
+            cat helm/${{ env.HELM_CHART_NAME }}/Chart.yaml
+          else
+            echo "Helm chart directory not found. Creating sample chart..."
+            mkdir -p helm/${{ env.HELM_CHART_NAME }}
+            helm create helm/${{ env.HELM_CHART_NAME }}
+
+            # Update with actual values
+            sed -i "s/^version:.*/version: ${{ steps.chart-version.outputs.version }}/" helm/${{ env.HELM_CHART_NAME }}/Chart.yaml
+            sed -i "s/^appVersion:.*/appVersion: \"${{ steps.chart-version.outputs.version }}\"/" helm/${{ env.HELM_CHART_NAME }}/Chart.yaml
+          fi
+
+      - name: Lint Helm chart
+        run: |
+          helm lint helm/${{ env.HELM_CHART_NAME }}
+
+      - name: Run Helm template test
+        run: |
+          helm template test-release helm/${{ env.HELM_CHART_NAME }} > /dev/null
+          echo "Helm template validation passed"
+
+      - name: Package Helm chart
+        run: |
+          helm package helm/${{ env.HELM_CHART_NAME }} -d .helm-package
+          ls -la .helm-package/
+
+      - name: Push Helm chart to GHCR
+        run: |
+          CHART_PACKAGE=$(ls .helm-package/*.tgz)
+          helm push $CHART_PACKAGE oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+
+      - name: Generate chart attestation
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: '.helm-package/*.tgz'
+          push-to-registry: false
+
+      - name: Upload Helm chart artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart-${{ steps.chart-version.outputs.version }}
+          path: .helm-package/*.tgz
+          retention-days: 90
+
+      - name: Output chart details
+        run: |
+          echo "Helm chart pushed to GHCR:"
+          echo "Chart: ${{ env.HELM_CHART_NAME }}"
+          echo "Version: ${{ steps.chart-version.outputs.version }}"
+          echo "Registry: oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts"
+          echo ""
+          echo "To install this chart:"
+          echo "helm install my-release oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/${{ env.HELM_CHART_NAME }} --version ${{ steps.chart-version.outputs.version }}"
+
+  verify-helm-installation:
+    name: Verify Helm Chart Installation
+    runs-on: ubuntu-latest
+    needs: package-and-push-helm
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: '3.13.0'
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: test-cluster
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo ${{ secrets.GITHUB_TOKEN }} | helm registry login ${{ env.REGISTRY }} --username ${{ github.actor }} --password-stdin
+
+      - name: Determine chart version
+        id: chart-version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION="0.1.0-${GITHUB_SHA::7}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Install Helm chart
+        run: |
+          helm install test-release \
+            oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/${{ env.HELM_CHART_NAME }} \
+            --version ${{ steps.chart-version.outputs.version }} \
+            --wait \
+            --timeout 5m
+
+      - name: Verify installation
+        run: |
+          helm list
+          kubectl get all
+
+          # Check if pods are running
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=${{ env.HELM_CHART_NAME }} --timeout=300s || true
+
+      - name: Uninstall chart
+        if: always()
+        run: |
+          helm uninstall test-release || true
+
+  image-security-summary:
+    name: Image Security Summary
+    runs-on: ubuntu-latest
+    needs: build-and-push-image
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Run Trivy vulnerability scanner on GHCR image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Security summary
+        run: |
+          echo "Image security scan completed for GHCR image"
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
